@@ -41,6 +41,24 @@ _rewind_workers: dict[str, "RewindWorker"] = {}
 _memory_snapshots: dict[tuple[str, str, int, int], bytes] = {}
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCREENSHOT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+_NATIVE_BUTTON_BINDINGS = {
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "triangle": "Triangle",
+    "circle": "Circle",
+    "cross": "Cross",
+    "square": "Square",
+    "select": "Select",
+    "start": "Start",
+    "l1": "L1",
+    "l2": "L2",
+    "l3": "L3",
+    "r1": "R1",
+    "r2": "R2",
+    "r3": "R3",
+}
 
 
 def _ok(**kw: Any) -> dict[str, Any]:
@@ -49,6 +67,75 @@ def _ok(**kw: Any) -> dict[str, Any]:
 
 def _err(message: str, **kw: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **kw}
+
+
+def _native_input_client() -> tuple[str, GDBClient] | None:
+    for target in ("ee", "iop"):
+        client = _clients[target]
+        if client.connected:
+            return target, client
+    return None
+
+
+def _select_input_backend(backend: str) -> tuple[str, str | None]:
+    requested = backend.strip().lower()
+    if requested not in {"auto", "native", "keyboard", "xinput"}:
+        raise ValueError("backend must be 'auto', 'native', 'keyboard', or 'xinput'")
+    native = _native_input_client()
+    if requested == "native":
+        if native is None:
+            raise GDBError("native input requires an active PCSX2 GDB connection")
+        return "native", None
+    if requested == "auto" and native is not None:
+        return "native", None
+    selected, fallback_reason = background_input.choose_backend(requested)
+    if requested == "auto" and fallback_reason is None:
+        fallback_reason = "native input unavailable because no PCSX2 GDB client is connected"
+    elif requested == "auto":
+        fallback_reason = (
+            "native input unavailable because no PCSX2 GDB client is connected; "
+            f"{fallback_reason}"
+        )
+    return selected, fallback_reason
+
+
+def _native_input_set(controller: int, binding: str, value: float) -> tuple[str, str]:
+    if controller < 0:
+        raise ValueError("controller must be non-negative")
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("native input value must be between 0.0 and 1.0")
+    native = _native_input_client()
+    if native is None:
+        raise GDBError("native input requires an active PCSX2 GDB connection")
+    target, client = native
+    value_milli = int(round(value * 1000.0))
+    reply = client.pcsx2_command(f"input_set {controller} {binding} {value_milli}")
+    if not reply.startswith("OK"):
+        raise GDBError(reply)
+    return target, reply
+
+
+def _native_button_name(button: str) -> tuple[str, str]:
+    normalized = background_input.normalize_button(button)
+    binding = _NATIVE_BUTTON_BINDINGS.get(normalized)
+    if binding is None:
+        raise ValueError(f"button {button!r} is not available on a DualShock 2 controller")
+    return normalized, binding
+
+
+def _native_analog_values(x: float, y: float, stick: str) -> dict[str, float]:
+    side = stick.strip().lower()
+    if side not in {"left", "right"}:
+        raise ValueError("stick must be 'left' or 'right'")
+    if not -1.0 <= x <= 1.0 or not -1.0 <= y <= 1.0:
+        raise ValueError("x and y must be between -1.0 and 1.0")
+    prefix = "L" if side == "left" else "R"
+    return {
+        f"{prefix}Left": max(0.0, -x),
+        f"{prefix}Right": max(0.0, x),
+        f"{prefix}Up": max(0.0, y),
+        f"{prefix}Down": max(0.0, -y),
+    }
 
 
 def _target(target: str) -> str:
@@ -1368,10 +1455,16 @@ def configure_background_input(config_path: str | None = None, device_index: int
 
 @mcp.tool()
 def background_input_status() -> dict:
-    """Return keyboard and optional XInput backend state without activating PCSX2."""
+    """Return native, keyboard, and optional XInput backend state without activating PCSX2."""
+    native = _native_input_client()
     return _ok(
         default_backend="auto",
-        auto_fallback="keyboard",
+        auto_order=["native", "xinput", "keyboard"],
+        native={
+            "available": native is not None,
+            "target": native[0] if native else None,
+            "backend": "qPcsx2",
+        },
         xinput_module_available=background_input.xinput_module_available(),
         xinput=background_input.gamepad.status(),
         keyboard_backend="PostMessageW/native-render-child",
@@ -1416,10 +1509,32 @@ def input_button_press(
     backend: str = "auto",
     pid: int | None = None,
     config_path: str | None = None,
+    controller: int = 0,
 ) -> dict:
-    """Press and release a PS2 button through keyboard or optional XInput without focus."""
+    """Press and release a PS2 button through native input, keyboard, or optional XInput without focus."""
     try:
-        selected, fallback_reason = background_input.choose_backend(backend)
+        selected, fallback_reason = _select_input_backend(backend)
+        if selected == "native":
+            if not 1 <= duration_ms <= 10_000:
+                raise ValueError("duration_ms must be between 1 and 10000")
+            normalized, binding = _native_button_name(button)
+            target, press_reply = _native_input_set(controller, binding, 1.0)
+            try:
+                time.sleep(duration_ms / 1000.0)
+            finally:
+                release_target, release_reply = _native_input_set(controller, binding, 0.0)
+            return _ok(
+                selected_backend="native",
+                fallback_reason=fallback_reason,
+                target=target,
+                release_target=release_target,
+                controller=controller,
+                button=normalized,
+                binding=binding,
+                duration_ms=duration_ms,
+                replies=[press_reply, release_reply],
+                foreground_activation=False,
+            )
         if selected == "xinput":
             return _ok(
                 selected_backend=selected,
@@ -1433,7 +1548,7 @@ def input_button_press(
             input_target=input_window,
             **keyboard_input.keyboard.press(int(input_window["hwnd"], 16), button, duration_ms, path),
         )
-    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+    except (background_input.BackgroundInputError, GDBError, OSError, TimeoutError, ValueError) as e:
         return _err(str(e), button=button, backend=backend)
 
 
@@ -1443,10 +1558,33 @@ def input_buttons_send(
     backend: str = "auto",
     pid: int | None = None,
     config_path: str | None = None,
+    controller: int = 0,
 ) -> dict:
-    """Set multiple PS2 button states through keyboard or optional XInput."""
+    """Set multiple PS2 button states through native input, keyboard, or optional XInput."""
     try:
-        selected, fallback_reason = background_input.choose_backend(backend)
+        selected, fallback_reason = _select_input_backend(backend)
+        if selected == "native":
+            target = None
+            replies: dict[str, str] = {}
+            for button, pressed in buttons.items():
+                normalized, binding = _native_button_name(button)
+                if pressed is None:
+                    continue
+                if not isinstance(pressed, bool):
+                    raise ValueError(f"button state for {button!r} must be true, false, or null")
+                target, replies[normalized] = _native_input_set(
+                    controller,
+                    binding,
+                    1.0 if pressed else 0.0,
+                )
+            return _ok(
+                selected_backend="native",
+                fallback_reason=fallback_reason,
+                target=target,
+                controller=controller,
+                replies=replies,
+                foreground_activation=False,
+            )
         if selected == "xinput":
             return _ok(
                 selected_backend=selected,
@@ -1460,7 +1598,7 @@ def input_buttons_send(
             input_target=input_window,
             **keyboard_input.keyboard.set_buttons(int(input_window["hwnd"], 16), buttons, path),
         )
-    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+    except (background_input.BackgroundInputError, GDBError, OSError, TimeoutError, ValueError) as e:
         return _err(str(e), buttons=buttons, backend=backend)
 
 
@@ -1472,10 +1610,28 @@ def input_analog_send(
     backend: str = "auto",
     pid: int | None = None,
     config_path: str | None = None,
+    controller: int = 0,
 ) -> dict:
-    """Set a PS2 analog stick through XInput or configured keyboard directions."""
+    """Set a PS2 analog stick through native input, XInput, or configured keyboard directions."""
     try:
-        selected, fallback_reason = background_input.choose_backend(backend)
+        selected, fallback_reason = _select_input_backend(backend)
+        if selected == "native":
+            target = None
+            values = _native_analog_values(x, y, stick)
+            replies: dict[str, str] = {}
+            for binding, value in values.items():
+                target, replies[binding] = _native_input_set(controller, binding, value)
+            return _ok(
+                selected_backend="native",
+                fallback_reason=fallback_reason,
+                target=target,
+                controller=controller,
+                stick=stick.strip().lower(),
+                x=x,
+                y=y,
+                replies=replies,
+                foreground_activation=False,
+            )
         if selected == "xinput":
             return _ok(
                 selected_backend=selected,
@@ -1489,33 +1645,59 @@ def input_analog_send(
             input_target=input_window,
             **keyboard_input.keyboard.set_analog(int(input_window["hwnd"], 16), x, y, stick, path),
         )
-    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+    except (background_input.BackgroundInputError, GDBError, OSError, TimeoutError, ValueError) as e:
         return _err(str(e), x=x, y=y, stick=stick, backend=backend)
 
 
 @mcp.tool()
-def input_reset(backend: str = "auto", pid: int | None = None) -> dict:
+def input_reset(backend: str = "auto", pid: int | None = None, controller: int = 0) -> dict:
     """Release keyboard and/or virtual controller state without focusing PCSX2."""
     try:
         requested = backend.strip().lower()
-        if requested not in {"auto", "keyboard", "xinput"}:
-            raise ValueError("backend must be 'auto', 'keyboard', or 'xinput'")
+        if requested not in {"auto", "native", "keyboard", "xinput"}:
+            raise ValueError("backend must be 'auto', 'native', 'keyboard', or 'xinput'")
+        native_result = None
+        native_target = None
+        if requested == "native" or (requested == "auto" and _native_input_client() is not None):
+            native = _native_input_client()
+            if native is None:
+                raise GDBError("native input requires an active PCSX2 GDB connection")
+            native_target, native_client = native
+            native_result = native_client.pcsx2_command(f"input_reset {controller}")
+            if not native_result.startswith("OK"):
+                raise GDBError(native_result)
+            if requested == "native":
+                return _ok(
+                    selected_backend="native",
+                    target=native_target,
+                    controller=controller,
+                    reply=native_result,
+                    foreground_activation=False,
+                )
         if requested == "xinput":
             return _ok(selected_backend="xinput", **background_input.gamepad.reset())
-        input_window, _path = _background_input_context(pid, None)
-        keyboard_result = keyboard_input.keyboard.reset(int(input_window["hwnd"], 16))
+        keyboard_result = None
+        input_window = None
+        try:
+            input_window, _path = _background_input_context(pid, None)
+            keyboard_result = keyboard_input.keyboard.reset(int(input_window["hwnd"], 16))
+        except (OSError, ValueError):
+            if requested == "keyboard":
+                raise
         xinput_result = (
             background_input.gamepad.reset()
             if requested == "auto" and background_input.gamepad.status()["connected"]
             else None
         )
         return _ok(
+            native=native_result,
+            native_target=native_target,
             keyboard=keyboard_result,
             xinput=xinput_result,
             input_target=input_window,
             foreground_activation=False,
         )
-    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+    except (background_input.BackgroundInputError, GDBError, OSError, TimeoutError, ValueError) as e:
         return _err(str(e), backend=backend)
 
 

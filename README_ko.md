@@ -23,7 +23,7 @@ PCSX2 MCP는 PCSX2의 EE 및 IOP GDB Remote Serial Protocol 엔드포인트를 �
 - PCSX2 프로세스 실행, 조회, 종료
 - PCSX2 로그 경로 탐색, 마지막 줄 조회, 오류 필터링
 - PCSX2 창을 비활성 상태로 유지한 캡처 및 조작
-- 대상 창 키보드 메시지 또는 선택적 가상 XInput 컨트롤러 사용
+- 네이티브 `qPcsx2` 입력, 선택적 가상 XInput 컨트롤러, 대상 창 키보드 메시지 사용
 
 ### 요구 사항
 
@@ -96,9 +96,10 @@ GDB 클라이언트가 연결된 경우 `take_screenshot`은 커스텀
 
 `configure_background_input`은 기존 1번 패드 바인딩을 보존하고
 키보드와 XInput 매핑을 추가합니다. 입력 도구의 `backend`에는
-`auto`, `keyboard`, `xinput`을 지정할 수 있습니다. `auto`는
-`vgamepad` 모듈 또는 드라이버를 사용할 수 없으면 대상 창에 보내는
-`PostMessageW` 키보드 입력으로 자동 전환합니다.
+`auto`, `native`, `keyboard`, `xinput`을 지정할 수 있습니다. `auto`는
+이미 연결된 EE 또는 IOP `qPcsx2` 클라이언트, 선택적 XInput, 대상 창
+`PostMessageW` 키보드 입력 순서로 시도합니다. `vgamepad` 모듈 또는
+드라이버가 없으면 키보드로 자동 전환합니다.
 
 PCSX2의 최상위 Qt 키 필터는 창 활성화를 요청할 수 있습니다. 따라서
 MCP 키보드 백엔드는 확인된 네이티브 렌더 자식 창에만 입력을 보내며,

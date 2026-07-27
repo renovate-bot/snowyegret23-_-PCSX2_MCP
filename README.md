@@ -22,7 +22,7 @@ PCSX2 MCP is a Windows-focused Model Context Protocol server for controlling and
 - Launch, list, and terminate PCSX2 processes.
 - Locate, tail, and filter PCSX2 logs.
 - Capture and control PCSX2 while its window remains inactive.
-- Use targeted keyboard messages or an optional virtual XInput controller.
+- Use native `qPcsx2` input, an optional virtual XInput controller, or targeted keyboard messages.
 
 ### Requirements
 
@@ -95,8 +95,10 @@ activating the window.
 
 `configure_background_input` preserves existing Pad 1 bindings and adds
 keyboard plus XInput mappings. Input tools accept `backend="auto"`,
-`"keyboard"`, or `"xinput"`. `auto` falls back to targeted `PostMessageW`
-keyboard events when `vgamepad` or its driver is unavailable.
+`"native"`, `"keyboard"`, or `"xinput"`. `auto` uses an already-connected
+EE or IOP `qPcsx2` client first, then tries optional XInput, and finally falls
+back to targeted `PostMessageW` keyboard events when `vgamepad` or its driver
+is unavailable.
 
 PCSX2's top-level Qt key filter may request activation. The MCP keyboard
 backend therefore sends only to a verified native render child. If that child
