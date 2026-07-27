@@ -22,6 +22,8 @@ PCSX2 MCP는 PCSX2의 EE 및 IOP GDB Remote Serial Protocol 엔드포인트를 �
 - 레지스터 및 메모리 상태를 JSONL로 주기적 기록
 - PCSX2 프로세스 실행, 조회, 종료
 - PCSX2 로그 경로 탐색, 마지막 줄 조회, 오류 필터링
+- PCSX2 창을 비활성 상태로 유지한 캡처 및 조작
+- 대상 창 키보드 메시지 또는 선택적 가상 XInput 컨트롤러 사용
 
 ### 요구 사항
 
@@ -43,6 +45,13 @@ PowerShell에서 저장소 폴더로 이동한 뒤 실행합니다.
 
 ```powershell
 python -m pip install -e .
+```
+
+키보드 입력에는 추가 의존성이 없습니다. XInput 지원은 선택 사항이며
+`vgamepad`와 설치된 ViGEmBus 드라이버를 사용합니다.
+
+```powershell
+python -m pip install -e ".[xinput]"
 ```
 
 서버를 직접 실행하려면 다음 명령을 사용합니다.
@@ -76,6 +85,25 @@ PYTHONPATH = 'C:\path\to\PCSX2_MCP\src'
 3. GDB 설정을 변경했다면 PCSX2를 다시 시작합니다.
 4. 게임을 실행한 뒤 `target="ee"` 또는 `target="iop"`로 `connect`를 호출합니다.
 5. 디버깅 및 자동화 도구를 사용하기 전에 `status` 또는 `pcsx2_status`로 상태를 확인합니다.
+
+### 백그라운드 캡처 및 입력
+
+GDB 클라이언트가 연결된 경우 `take_screenshot`은 커스텀
+`qPcsx2 screenshot_file` 명령으로 에뮬레이터 렌더 버퍼를 직접
+저장하므로 데스크톱 포커스를 건드리지 않습니다. 연결되지 않은 PNG
+요청은 창을 복원하거나 활성화하지 않는 `capture_pcsx2_window`의
+`PrintWindow` 방식으로 처리합니다.
+
+`configure_background_input`은 기존 1번 패드 바인딩을 보존하고
+키보드와 XInput 매핑을 추가합니다. 입력 도구의 `backend`에는
+`auto`, `keyboard`, `xinput`을 지정할 수 있습니다. `auto`는
+`vgamepad` 모듈 또는 드라이버를 사용할 수 없으면 대상 창에 보내는
+`PostMessageW` 키보드 입력으로 자동 전환합니다.
+
+PCSX2의 최상위 Qt 키 필터는 창 활성화를 요청할 수 있습니다. 따라서
+MCP 키보드 백엔드는 확인된 네이티브 렌더 자식 창에만 입력을 보내며,
+자식 창을 식별하지 못하면 최상위 창에 입력을 보내지 않고 오류를
+반환합니다.
 
 ### 일반적인 작업 순서
 

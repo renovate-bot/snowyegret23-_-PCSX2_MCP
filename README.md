@@ -21,6 +21,8 @@ PCSX2 MCP is a Windows-focused Model Context Protocol server for controlling and
 - Record periodic register and memory traces to JSONL.
 - Launch, list, and terminate PCSX2 processes.
 - Locate, tail, and filter PCSX2 logs.
+- Capture and control PCSX2 while its window remains inactive.
+- Use targeted keyboard messages or an optional virtual XInput controller.
 
 ### Requirements
 
@@ -42,6 +44,13 @@ Open PowerShell in the repository directory:
 
 ```powershell
 python -m pip install -e .
+```
+
+Keyboard input has no extra dependency. Optional XInput support uses
+`vgamepad` and an installed ViGEmBus driver:
+
+```powershell
+python -m pip install -e ".[xinput]"
 ```
 
 Run the server directly:
@@ -75,6 +84,24 @@ The `python` command must resolve to the interpreter where the project dependenc
 3. Restart PCSX2 after changing the GDB settings.
 4. Start a game, then call `connect` with `target="ee"` or `target="iop"`.
 5. Call `status` or `pcsx2_status` before using debugging and automation tools.
+
+### Background capture and input
+
+`take_screenshot` uses the custom `qPcsx2 screenshot_file` command when the
+GDB client is connected, so it captures the emulator render buffer without
+touching the desktop focus. When disconnected, PNG requests fall back to
+`capture_pcsx2_window`, which uses `PrintWindow` without restoring or
+activating the window.
+
+`configure_background_input` preserves existing Pad 1 bindings and adds
+keyboard plus XInput mappings. Input tools accept `backend="auto"`,
+`"keyboard"`, or `"xinput"`. `auto` falls back to targeted `PostMessageW`
+keyboard events when `vgamepad` or its driver is unavailable.
+
+PCSX2's top-level Qt key filter may request activation. The MCP keyboard
+backend therefore sends only to a verified native render child. If that child
+cannot be identified, it returns an error instead of sending to the top-level
+window.
 
 ### Typical workflow
 

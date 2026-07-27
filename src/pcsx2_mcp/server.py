@@ -14,8 +14,11 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import background_input
+from . import keyboard_input
 from . import log_reader
 from . import process as pcsx2_process
+from . import window_capture
 from .gdb_client import BP_TYPE_MAP, GDBClient, GDBError, REG_NAMES
 
 DEFAULT_HOST = "127.0.0.1"
@@ -342,6 +345,19 @@ def _config_candidates() -> list[Path]:
     return [docs / "PCSX2.ini", docs / "inis" / "PCSX2.ini", local / "PCSX2.ini"]
 
 
+def _background_input_context(pid: int | None, config_path: str | None) -> tuple[dict[str, Any], Path | None]:
+    processes = pcsx2_process.find_processes() if pid is None else [{"pid": pid}]
+    if not processes:
+        raise ValueError("no PCSX2 process found")
+    window = window_capture.find_window([int(process["pid"]) for process in processes])
+    input_window = window_capture.find_input_window(int(window["hwnd"], 16))
+    path = Path(config_path) if config_path else next(
+        (candidate for candidate in background_input.default_config_candidates() if candidate.exists()),
+        None,
+    )
+    return input_window, path
+
+
 def _write_simple_ini_values(path: Path, section: str, values: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.exists() else []
@@ -655,6 +671,11 @@ def take_screenshot(file_path: str | None = None, target: str = "ee") -> dict:
     """Save the current PCSX2 render frame to an image file, even if the emulator window is inactive or minimized."""
     try:
         out = _prepare_screenshot_path(file_path)
+        if not _client(target).connected:
+            if out.suffix.lower() != ".png":
+                return _err("the disconnected inactive-window fallback supports PNG output only", path=str(out))
+            result = capture_pcsx2_window(str(out))
+            return {**result, "target": target, "fallback": "inactive-window"}
         encoded_path = _encode_debug_text_argument(str(out))
         reply = _client(target).pcsx2_command(f"screenshot_file {encoded_path}", timeout=90.0)
         parsed = _parse_screenshot_reply(reply)
@@ -663,7 +684,16 @@ def take_screenshot(file_path: str | None = None, target: str = "ee") -> dict:
         size = out.stat().st_size
     except (OSError, GDBError, ValueError, TimeoutError) as e:
         return _err(str(e))
-    return _ok(target=target, path=str(out), exists=True, file_size=size, reply=reply, **parsed)
+    return _ok(
+        target=target,
+        path=str(out),
+        exists=True,
+        file_size=size,
+        reply=reply,
+        method="qPcsx2 screenshot_file",
+        foreground_activation=False,
+        **parsed,
+    )
 
 
 @mcp.tool()
@@ -1325,6 +1355,168 @@ def configure_gdb_settings(
     except OSError as e:
         return _err(str(e))
     return _ok(path=str(path), values=values, note="Restart PCSX2 or reload settings after changing these keys.")
+
+
+@mcp.tool()
+def configure_background_input(config_path: str | None = None, device_index: int = 0) -> dict:
+    """Preserve existing Pad 1 bindings and add keyboard plus optional XInput bindings."""
+    try:
+        return _ok(**background_input.configure_background_input(config_path, device_index))
+    except (OSError, ValueError) as e:
+        return _err(str(e), config_path=config_path, device_index=device_index)
+
+
+@mcp.tool()
+def background_input_status() -> dict:
+    """Return keyboard and optional XInput backend state without activating PCSX2."""
+    return _ok(
+        default_backend="auto",
+        auto_fallback="keyboard",
+        xinput_module_available=background_input.xinput_module_available(),
+        xinput=background_input.gamepad.status(),
+        keyboard_backend="PostMessageW/native-render-child",
+        foreground_activation=False,
+    )
+
+
+@mcp.tool()
+def list_pcsx2_windows(pid: int | None = None) -> dict:
+    """List visible PCSX2 windows without changing focus or window state."""
+    try:
+        if pid is not None:
+            return _ok(pid=pid, windows=window_capture.list_windows(pid))
+        processes = pcsx2_process.find_processes()
+        windows = [window for process in processes for window in window_capture.list_windows(int(process["pid"]))]
+        return _ok(windows=windows)
+    except OSError as e:
+        return _err(str(e), pid=pid)
+
+
+@mcp.tool()
+def capture_pcsx2_window(output_path: str | None = None, pid: int | None = None) -> dict:
+    """Capture an inactive or covered PCSX2 window without restoring or activating it."""
+    try:
+        processes = pcsx2_process.find_processes() if pid is None else [{"pid": pid}]
+        if not processes:
+            return _err("no PCSX2 process found")
+        window = window_capture.find_window([int(process["pid"]) for process in processes])
+        out = window_capture.default_output_path() if output_path is None else Path(output_path)
+        if not out.is_absolute():
+            out = Path.cwd() / out
+        result = window_capture.capture_window(int(window["hwnd"], 16), out)
+        return _ok(pid=window["pid"], title=window["title"], class_name=window["class_name"], **result)
+    except (OSError, ValueError, RuntimeError) as e:
+        return _err(str(e), pid=pid, output_path=output_path)
+
+
+@mcp.tool()
+def input_button_press(
+    button: str,
+    duration_ms: int = 100,
+    backend: str = "auto",
+    pid: int | None = None,
+    config_path: str | None = None,
+) -> dict:
+    """Press and release a PS2 button through keyboard or optional XInput without focus."""
+    try:
+        selected, fallback_reason = background_input.choose_backend(backend)
+        if selected == "xinput":
+            return _ok(
+                selected_backend=selected,
+                fallback_reason=fallback_reason,
+                **background_input.gamepad.press(button, duration_ms),
+            )
+        input_window, path = _background_input_context(pid, config_path)
+        return _ok(
+            selected_backend=selected,
+            fallback_reason=fallback_reason,
+            input_target=input_window,
+            **keyboard_input.keyboard.press(int(input_window["hwnd"], 16), button, duration_ms, path),
+        )
+    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+        return _err(str(e), button=button, backend=backend)
+
+
+@mcp.tool()
+def input_buttons_send(
+    buttons: dict[str, bool | None],
+    backend: str = "auto",
+    pid: int | None = None,
+    config_path: str | None = None,
+) -> dict:
+    """Set multiple PS2 button states through keyboard or optional XInput."""
+    try:
+        selected, fallback_reason = background_input.choose_backend(backend)
+        if selected == "xinput":
+            return _ok(
+                selected_backend=selected,
+                fallback_reason=fallback_reason,
+                **background_input.gamepad.set_buttons(buttons),
+            )
+        input_window, path = _background_input_context(pid, config_path)
+        return _ok(
+            selected_backend=selected,
+            fallback_reason=fallback_reason,
+            input_target=input_window,
+            **keyboard_input.keyboard.set_buttons(int(input_window["hwnd"], 16), buttons, path),
+        )
+    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+        return _err(str(e), buttons=buttons, backend=backend)
+
+
+@mcp.tool()
+def input_analog_send(
+    x: float,
+    y: float,
+    stick: str = "left",
+    backend: str = "auto",
+    pid: int | None = None,
+    config_path: str | None = None,
+) -> dict:
+    """Set a PS2 analog stick through XInput or configured keyboard directions."""
+    try:
+        selected, fallback_reason = background_input.choose_backend(backend)
+        if selected == "xinput":
+            return _ok(
+                selected_backend=selected,
+                fallback_reason=fallback_reason,
+                **background_input.gamepad.set_analog(x, y, stick),
+            )
+        input_window, path = _background_input_context(pid, config_path)
+        return _ok(
+            selected_backend=selected,
+            fallback_reason=fallback_reason,
+            input_target=input_window,
+            **keyboard_input.keyboard.set_analog(int(input_window["hwnd"], 16), x, y, stick, path),
+        )
+    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+        return _err(str(e), x=x, y=y, stick=stick, backend=backend)
+
+
+@mcp.tool()
+def input_reset(backend: str = "auto", pid: int | None = None) -> dict:
+    """Release keyboard and/or virtual controller state without focusing PCSX2."""
+    try:
+        requested = backend.strip().lower()
+        if requested not in {"auto", "keyboard", "xinput"}:
+            raise ValueError("backend must be 'auto', 'keyboard', or 'xinput'")
+        if requested == "xinput":
+            return _ok(selected_backend="xinput", **background_input.gamepad.reset())
+        input_window, _path = _background_input_context(pid, None)
+        keyboard_result = keyboard_input.keyboard.reset(int(input_window["hwnd"], 16))
+        xinput_result = (
+            background_input.gamepad.reset()
+            if requested == "auto" and background_input.gamepad.status()["connected"]
+            else None
+        )
+        return _ok(
+            keyboard=keyboard_result,
+            xinput=xinput_result,
+            input_target=input_window,
+            foreground_activation=False,
+        )
+    except (background_input.BackgroundInputError, OSError, ValueError) as e:
+        return _err(str(e), backend=backend)
 
 
 @mcp.tool()

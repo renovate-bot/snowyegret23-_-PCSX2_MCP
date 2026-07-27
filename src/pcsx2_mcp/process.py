@@ -126,4 +126,11 @@ def launch(exe_path: str, game_path: str | None = None, extra_args: list[str] | 
         )
     finally:
         log.close()
-    return {"ok": True, "pid": proc.pid, "args": args, "log_path": str(log_path)}
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "args": args,
+        "log_path": str(log_path),
+        "foreground_activation": False,
+        "show_policy": "SW_HIDE",
+    }
