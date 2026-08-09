@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from . import background_input
 from . import keyboard_input
@@ -33,7 +33,7 @@ MEMORY_REGIONS: dict[str, tuple[str, int, int]] = {
     "iop_bios": ("iop", 0x1FC00000, 0x00400000),
 }
 
-mcp = FastMCP("pcsx2-mcp")
+mcp = MCPServer("pcsx2-mcp")
 
 _clients: dict[str, GDBClient] = {"ee": GDBClient("ee"), "iop": GDBClient("iop")}
 _trace_workers: dict[str, "TraceWorker"] = {}

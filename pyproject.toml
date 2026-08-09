@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server for PCSX2 GDB debugging, VM control, tracing, and dumps"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.2.0",
+    "mcp[cli]>=2.0.0,<3",
     "psutil>=5.9",
 ]
 
